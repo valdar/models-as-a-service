@@ -1,0 +1,1438 @@
+openapi: 3.0.3
+info:
+    title: Models as a Service API
+    description: Models as a Service Billing and Management API
+    version: "1.0"
+    contact:
+        name: MaaS API Support
+        url: https://github.com/opendatahub-io/models-as-a-service
+        email: opendatahub@redhat.com
+    license:
+        name: Apache 2.0
+        url: https://www.apache.org/licenses/LICENSE-2.0
+servers:
+    - url: '{serverUrl}'
+      variables:
+        serverUrl:
+          default: http://localhost:8080
+          description: API server URL (e.g. https://maas-api.example.com)
+security:
+  - bearerAuth: []
+paths:
+    /health:
+        get:
+            tags:
+                - health
+            summary: Check the health status of the MaaS API service
+            description: Check if the API service is running and ready to handle requests. Used by load balancers and monitoring.
+            operationId: health#healthcheck
+            security: []  # Health endpoint doesn't require authentication
+            responses:
+                "200":
+                    description: OK response.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/HealthResponse'
+                            example:
+                                status: healthy
+    /v1/me:
+        get:
+            tags:
+                - identity
+            summary: Return the authenticated caller identity
+            description: |
+                Returns the verified `iss` and `sub` claims, optional profile claims, and all literal
+                organization membership entries from the trusted OIDC identity envelope. Other
+                gateway-authenticated callers receive the same response shape with the trusted
+                gateway identity as `sub`, `name`, and `preferred_username`, and the authenticated
+                group list. `iss` is omitted for those callers because they do not provide an OIDC
+                issuer claim. Optional claims are returned verbatim when present and nonempty; they
+                are omitted when absent or empty, and are never replaced with `null` or an empty
+                array. The response contains no computed permissions, subscriptions, or inventory.
+                Group claims and organization membership entries are independent literal claims;
+                neither is used to infer or validate the other.
+            operationId: identity#get-me
+            responses:
+                "200":
+                    description: OK response. The response must not be cached.
+                    headers:
+                        Cache-Control:
+                            description: Disables response caching.
+                            schema:
+                                type: string
+                                example: no-store
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/CallerIdentity'
+                            example:
+                                iss: https://issuer.example.com
+                                sub: user-1
+                                preferred_username: alex
+                                email: alex@example.com
+                                groups:
+                                    - idp-developers
+                                https://redhat.com/maas/orgs:
+                                    - organization_id: 42c3e46f-2477-44d7-a85b-d3b43f6b31fa
+                                      organization_name: grid-tenant
+                                      roles:
+                                          - admins
+                                    - organization_id: 53d4f57e-3588-55e8-b96c-4ec54a7c42fa
+                "401":
+                    description: Unauthorized. Authenticated identity is missing or invalid.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+    /v1/models:
+        get:
+            tags:
+                - models
+            summary: Lists available large language models in OpenAI-compatible format
+            description: |
+                Lists available large language models in OpenAI-compatible format.
+
+                Behavior depends on authentication method and headers:
+
+                **API key authentication** (Bearer sk-oai-*):
+                - Returns models available via the subscription bound to the API key at mint time
+                - The X-MaaS-Subscription header is automatically injected by the gateway from the key's subscription
+                - No manual headers required
+
+                **User token authentication** (Bearer without sk-oai- prefix):
+                - Default (no X-MaaS-Subscription header): Returns all models from all accessible subscriptions
+                - With X-MaaS-Subscription header: Returns models from the specified subscription only (allows users to scope their query)
+
+                The X-MaaS-Subscription header provides flexible filtering for user tokens while API keys are automatically scoped.
+            operationId: models#list_llms
+            parameters:
+                - in: header
+                  name: X-MaaS-Subscription
+                  schema:
+                      type: string
+                  required: false
+                  description: |
+                      (User tokens only) Filter models to a specific subscription by name.
+                      When provided with a user token, behaves like an API key request - returns only models from that subscription.
+                      For API keys, this header is automatically injected by the gateway and should not be manually specified.
+                  example: premium-subscription
+            responses:
+                "401":
+                    description: Unauthorized. Missing or invalid Authorization header.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                            example:
+                                error:
+                                    message: "Authorization required"
+                                    type: "authentication_error"
+                "403":
+                    description: |
+                        Forbidden. Subscription access error. Possible cases:
+                        - API key has no subscription bound (invalid state)
+                        - Access denied to the subscription bound to the API key
+                        - Subscription not found
+                        - User has no accessible subscriptions
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                            examples:
+                                no_subscription_bound:
+                                    summary: API key has no subscription bound
+                                    value:
+                                        error:
+                                            message: "API key has no subscription bound"
+                                            type: "permission_error"
+                                access_denied:
+                                    summary: Access denied to subscription
+                                    value:
+                                        error:
+                                            message: "access denied to subscription"
+                                            type: "permission_error"
+                                not_found:
+                                    summary: Subscription not found
+                                    value:
+                                        error:
+                                            message: "subscription not found"
+                                            type: "permission_error"
+                                no_subscription:
+                                    summary: No accessible subscriptions
+                                    value:
+                                        error:
+                                            message: "no subscription found for user"
+                                            type: "permission_error"
+                "200":
+                    description: OK response.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ModelListResponse'
+                            examples:
+                                single_subscription:
+                                    summary: Response with single subscription (default)
+                                    value:
+                                        object: list
+                                        data:
+                                            - created: 1672531200
+                                              id: llama-2-7b-chat
+                                              object: model
+                                              owned_by: model-namespace/llama-2-7b-chat
+                                              ready: true
+                                              url: https://api.example.com/v1/models/llama-2-7b-chat
+                                              kind: LLMInferenceService
+                                              subscriptions:
+                                                  - name: basic-subscription
+                                            - created: 1672531200
+                                              id: mistral-7b-instruct
+                                              object: model
+                                              owned_by: model-namespace/mistral-7b-instruct
+                                              ready: true
+                                              url: https://api.example.com/v1/models/mistral-7b-instruct
+                                              kind: LLMInferenceService
+                                              subscriptions:
+                                                  - name: basic-subscription
+                                aggregated_subscriptions:
+                                    summary: Response with X-MaaS-Return-All-Models (subscription aggregation)
+                                    value:
+                                        object: list
+                                        data:
+                                            - created: 1672531200
+                                              id: llama-2-7b-chat
+                                              object: model
+                                              owned_by: model-namespace/llama-2-7b-chat
+                                              ready: true
+                                              url: https://api.example.com/v1/models/llama-2-7b-chat
+                                              kind: LLMInferenceService
+                                              subscriptions:
+                                                  - name: basic-subscription
+                                                    displayName: Basic Tier
+                                                  - name: premium-subscription
+                                                    displayName: Premium Tier
+                                                    description: Premium subscription with higher rate limits
+                                            - created: 1672531200
+                                              id: granite-8b-code-instruct
+                                              object: model
+                                              owned_by: model-namespace/granite-8b-code-instruct
+                                              ready: true
+                                              url: https://api.example.com/v1/models/granite-8b-code-instruct
+                                              kind: LLMInferenceService
+                                              subscriptions:
+                                                  - name: premium-subscription
+                                                    displayName: Premium Tier
+                                                    description: Premium subscription with higher rate limits
+                "500":
+                    description: Internal Server Error response.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                            example:
+                                error:
+                                    message: Failed to retrieve LLM models
+                                    type: server_error
+    /v1/api-keys:
+        post:
+            tags:
+                - api-keys-v2
+            summary: Create a new hash-based API key
+            description: |
+                Creates a new OpenAI-compatible API key (sk-oai-* format). Name is required for
+                regular keys but optional for ephemeral keys. If expiresIn is not provided, defaults
+                to API_KEY_MAX_EXPIRATION_DAYS (default 90 days) for regular keys, or 1 hour for
+                ephemeral keys. The plaintext key is shown ONLY ONCE at creation time and cannot be
+                retrieved again.
+
+                Key creation is self-service and uses the caller's owner entitlement. A delegated
+                subscription administrator cannot create a key on behalf of another user.
+            operationId: api-keys-v2#create
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            type: object
+                            properties:
+                                name:
+                                    type: string
+                                    description: Human-readable name for the API key. Required for regular keys, optional for ephemeral keys.
+                                description:
+                                    type: string
+                                    description: Optional description
+                                expiresIn:
+                                    type: string
+                                    description: Expiration duration (e.g., "30d", "90d", "1h"). Defaults to API_KEY_MAX_EXPIRATION_DAYS for regular keys, 1 hour for ephemeral keys.
+                                ephemeral:
+                                    type: boolean
+                                    description: Create a short-lived programmatic key. Defaults to false. Ephemeral keys have 1hr default and maximum expiration (enforced), and optional name.
+                                    default: false
+                                subscription:
+                                    type: string
+                                    description: Optional MaaSSubscription resource name to bind to this key. When omitted, the user's highest-priority accessible subscription is used (spec.priority, descending).
+                        examples:
+                            default_expiration:
+                                summary: API key with default expiration (API_KEY_MAX_EXPIRATION_DAYS)
+                                value:
+                                    name: my-api-key
+                                    description: Production API key
+                            custom_expiration:
+                                summary: API key with custom expiration (30 days)
+                                value:
+                                    name: my-short-lived-key
+                                    description: 30-day test key
+                                    expiresIn: 30d
+                            with_subscription:
+                                summary: API key bound to specific subscription
+                                value:
+                                    name: my-premium-key
+                                    description: Key for premium subscription
+                                    subscription: premium-subscription
+                            ephemeral_key:
+                                summary: Ephemeral key for programmatic use (1hr expiration)
+                                value:
+                                    ephemeral: true
+            responses:
+                "201":
+                    description: Created response.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required:
+                                    - key
+                                    - keyPrefix
+                                    - id
+                                    - name
+                                    - subscription
+                                    - createdAt
+                                    - expiresAt
+                                    - ephemeral
+                                properties:
+                                    key:
+                                        type: string
+                                        description: Plaintext API key (SHOWN ONCE, NEVER AGAIN)
+                                    keyPrefix:
+                                        type: string
+                                        description: Display prefix for UI (e.g., sk-oai-abc)
+                                    id:
+                                        type: string
+                                        description: Unique identifier for the key
+                                    name:
+                                        type: string
+                                        description: Name of the key
+                                    subscription:
+                                        type: string
+                                        description: MaaSSubscription name bound to this key at creation time
+                                    createdAt:
+                                        type: string
+                                        format: date-time
+                                        description: Creation timestamp (RFC3339)
+                                    expiresAt:
+                                        type: string
+                                        format: date-time
+                                        description: Expiration timestamp (RFC3339)
+                                    ephemeral:
+                                        type: boolean
+                                        description: Whether this is a short-lived programmatic key
+                "400":
+                    description: |
+                        Bad Request. Includes validation errors and subscription resolution failures
+                        for API key creation. Subscription-related failures use a single error code
+                        (`invalid_subscription`) and message so clients cannot distinguish
+                        not-found, access denied, or no default subscription.
+                "401":
+                    description: Unauthorized response.
+    /v1/api-keys/search:
+        post:
+            tags:
+                - api-keys-v2
+            summary: Search and filter API keys
+            description: |
+                Search API keys with flexible filtering, sorting, and pagination. Supports filtering
+                by username, status, subscription, sorting by multiple fields, and pagination.
+                Ephemeral keys are excluded by default.
+
+                Regular users can search only their own keys. A verified SSO subscription
+                administrator can search metadata for all users in an explicitly authorized
+                subscription. The subscription filter is canonicalized to its stored plain name
+                before pagination and result counts; omitting it does not broaden a delegated
+                administrator's search to every administered subscription or organization user.
+            operationId: api-keys-v2#search
+            requestBody:
+                required: false
+                content:
+                    application/json:
+                        schema:
+                            type: object
+                            properties:
+                                filters:
+                                    type: object
+                                    properties:
+                                        username:
+                                            type: string
+                                            description: Filter by username. Cross-user searches require platform-admin or delegated subscription-admin authorization.
+                                        subscription:
+                                            type: string
+                                            description: Subscription name or namespace/name alias. Delegated administrators must administer this subscription.
+                                        status:
+                                            type: array
+                                            items:
+                                                type: string
+                                                enum: [active, revoked, expired]
+                                            description: Filter by status (active, revoked, expired). Defaults to active only.
+                                        includeEphemeral:
+                                            type: boolean
+                                            description: Include ephemeral keys in results. Defaults to false.
+                                            default: false
+                                sort:
+                                    type: object
+                                    properties:
+                                        by:
+                                            type: string
+                                            enum: [created_at, expires_at, last_used_at, name]
+                                            description: Field to sort by
+                                        order:
+                                            type: string
+                                            enum: [asc, desc]
+                                            description: Sort order
+                                pagination:
+                                    type: object
+                                    properties:
+                                        limit:
+                                            type: integer
+                                            minimum: 1
+                                            maximum: 100
+                                            default: 50
+                                        offset:
+                                            type: integer
+                                            minimum: 0
+                                            default: 0
+                        examples:
+                            default_search:
+                                summary: Default search (active keys, newest first, excludes ephemeral)
+                                value:
+                                    filters:
+                                        status: ["active"]
+                                    sort:
+                                        by: "created_at"
+                                        order: "desc"
+                                    pagination:
+                                        limit: 50
+                                        offset: 0
+                            admin_search:
+                                summary: Admin searching user's keys
+                                value:
+                                    filters:
+                                        username: "alice"
+                                        status: ["active", "revoked"]
+                                    sort:
+                                        by: "name"
+                                        order: "asc"
+                                    pagination:
+                                        limit: 20
+                                        offset: 0
+                            delegated_admin_search:
+                                summary: Delegated subscription administrator searching an authorized subscription
+                                value:
+                                    filters:
+                                        subscription: "tenant-namespace/subscription-a"
+                                    sort:
+                                        by: "created_at"
+                                        order: "desc"
+                                    pagination:
+                                        limit: 50
+                                        offset: 0
+                            include_ephemeral:
+                                summary: Include ephemeral keys in search
+                                value:
+                                    filters:
+                                        status: ["active"]
+                                        includeEphemeral: true
+            responses:
+                "200":
+                    description: OK response.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ApiKeyListResponse'
+                            example:
+                                object: list
+                                data:
+                                    - id: key_abc123
+                                      name: my-production-key
+                                      subscription: premium-subscription
+                                      creationDate: "2024-01-15T10:30:00Z"
+                                      status: active
+                                      ephemeral: false
+                                    - id: key_def456
+                                      name: my-test-key
+                                      subscription: basic-subscription
+                                      creationDate: "2024-01-14T09:15:00Z"
+                                      expirationDate: "2024-04-14T09:15:00Z"
+                                      status: active
+                                      ephemeral: false
+                                has_more: true
+                "400":
+                    description: Bad Request. Invalid search parameters.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                "401":
+                    description: Unauthorized response.
+    /v1/api-keys/bulk-revoke:
+        post:
+            tags:
+                - api-keys-v2
+            summary: Bulk revoke API keys by user and/or subscription
+            description: |
+                Revokes all active API keys matching the specified scope. At least one of
+                `username` or `subscription` must be provided.
+
+                **Authorization rules:**
+                - Regular users can bulk revoke their own keys (username = self).
+                - Subscription-scoped revocation requires platform-admin or delegated
+                  subscription-admin authorization.
+                - Cross-user revocation requires platform-admin authorization, or an explicit
+                  subscription for which the SSO caller has delegated admin authority.
+
+                A username-only request does not authorize a delegated administrator to revoke a
+                user's keys across subscriptions. Dry-run counts and mutations use the same
+                canonical tenant and subscription scope.
+
+                When `dryRun` is true, the response includes the count of keys that
+                would be revoked without performing any mutation.
+            operationId: api-keys-v2#bulk-revoke
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            type: object
+                            anyOf:
+                                - required: [username]
+                                - required: [subscription]
+                            properties:
+                                username:
+                                    type: string
+                                    description: Username whose keys should be revoked.
+                                subscription:
+                                    type: string
+                                    description: Subscription name or namespace/name alias whose bound keys should be revoked. Delegated administrators must administer this subscription.
+                                dryRun:
+                                    type: boolean
+                                    default: false
+                                    description: When true, returns the count of keys that would be revoked without performing any mutation.
+                        examples:
+                            revoke_own:
+                                summary: User revoking own keys
+                                value:
+                                    username: "alice"
+                            admin_revoke_by_subscription:
+                                summary: Admin revoking all keys for a subscription
+                                value:
+                                    subscription: "premium-simulator-subscription"
+                            dry_run:
+                                summary: Dry-run preview (no mutation)
+                                value:
+                                    username: "alice"
+                                    dryRun: true
+                            combined_scope:
+                                summary: Admin revoking a user's keys in a specific subscription
+                                value:
+                                    username: "bob"
+                                    subscription: "simulator-subscription"
+            responses:
+                "200":
+                    description: OK response.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    revokedCount:
+                                        type: integer
+                                        description: Number of keys revoked (or that would be revoked in dry-run).
+                                    message:
+                                        type: string
+                                        description: Human-readable result message.
+                                    dryRun:
+                                        type: boolean
+                                        description: True when the request was a dry-run (no keys were mutated).
+                            examples:
+                                revoke_result:
+                                    summary: Successful revocation
+                                    value:
+                                        revokedCount: 5
+                                        message: "Successfully revoked 5 active API key(s) for user alice"
+                                dry_run_result:
+                                    summary: Dry-run result
+                                    value:
+                                        revokedCount: 3
+                                        message: "Dry run: 3 active key(s) would be revoked for subscription premium-simulator-subscription"
+                                        dryRun: true
+                "400":
+                    description: Bad Request. At least one of username or subscription is required.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                "401":
+                    description: Unauthorized response.
+                "403":
+                    description: Forbidden. Admin privileges required for subscription-scoped or cross-user revocation.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+    /v1/api-keys/config:
+        get:
+            tags:
+                - api-keys-v2
+            summary: Get API key configuration limits
+            description: |
+                Returns the API key limits that apply when creating keys.
+                Useful for clients (e.g. Dashboard) that need to display valid ranges
+                for expiration without requiring admin access to the Tenant CR.
+            operationId: api-keys#get-config
+            responses:
+                "200":
+                    description: OK response.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ApiKeyConfig'
+                            example:
+                                max_expiration_days: 90
+                                ephemeral_max_expiration: "1h"
+                "401":
+                    description: Unauthorized. Missing or invalid Authorization header.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+    /v1/api-keys/{id}:
+        get:
+            tags:
+                - api-keys-v2
+            summary: Get a specific API key by ID
+            description: |
+                Returns metadata for a single API key by its ID. The key owner, a platform
+                administrator, or a verified SSO administrator for the key's stored subscription
+                binding can read this metadata. The original key secret is never returned.
+            operationId: api-keys-v2#get
+            parameters:
+                - in: path
+                  name: id
+                  schema:
+                      type: string
+                  required: true
+                  description: ID of the API key to retrieve
+            responses:
+                "200":
+                    description: OK response.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ApiKey'
+                "404":
+                    description: Not Found. API key not found.
+                "401":
+                    description: Unauthorized response.
+        delete:
+            tags:
+                - api-keys-v2
+            summary: Revoke a specific API key
+            description: |
+                Revokes a specific API key by changing its status to 'revoked'. The key will no
+                longer be valid for authentication but remains visible in API key lists for audit
+                purposes. The key owner, a platform administrator, or a verified SSO administrator
+                for the key's stored subscription binding can revoke it. A supplied key ID cannot
+                escape the MaaS Tenant or subscription binding.
+            operationId: api-keys-v2#delete
+            parameters:
+                - in: path
+                  name: id
+                  schema:
+                      type: string
+                  required: true
+                  description: ID of the API key to revoke
+            responses:
+                "200":
+                    description: OK. Key successfully revoked.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ApiKey'
+                            example:
+                                id: key_abc123
+                                name: my-production-key
+                                subscription: premium-subscription
+                                creationDate: "2024-01-15T10:30:00Z"
+                                status: revoked
+                                ephemeral: false
+                "404":
+                    description: Not Found. API key not found.
+                "401":
+                    description: Unauthorized response.
+                "403":
+                    description: Forbidden. User trying to revoke another user's key.
+    /v1/subscriptions:
+        get:
+            tags:
+                - subscriptions
+            summary: List owner and administered subscriptions
+            description: |
+                Returns the union of owner-visible and organization-administered MaaSSubscription
+                resources, deduplicated by namespace and name.
+
+                Owner visibility retains the existing Active/Degraded, non-deleting, and
+                model-authorization filters. A verified SSO caller additionally sees Pending and
+                Failed resources when the subscription's organization association resolves to an
+                organization for which that caller has the admin role.
+
+                Owner-only and API-key items omit `roles`; admin-only items return `["admin"]`;
+                owner/admin overlap returns `["owner","admin"]`. Administered items return every
+                configured model reference, irrespective of inference readiness or authorization.
+                Owner-only and API-key items retain the existing inference-eligible model-reference
+                behavior. Administered model references include `subjects`, an admin-only
+                intersection of `MaaSSubscription.spec.owner` and organization-qualified
+                MaaSAuthPolicy subjects for that exact model reference. The subscription-level
+                `owner` field is the deduplicated union of those per-model `subjects` results.
+            operationId: subscriptions#list
+            responses:
+                "200":
+                    description: OK response.
+                    content:
+                        application/json:
+                            schema:
+                                type: array
+                                items:
+                                    $ref: '#/components/schemas/SubscriptionListItem'
+                            example:
+                                - subscription_id_header: grid-subscription
+                                  roles:
+                                      - admin
+                                  organization_id: 42c3e46f-2477-44d7-a85b-d3b43f6b31fa
+                                  subscription_description: Free Tier
+                                  priority: 0
+                                  owner:
+                                      groups:
+                                          - name: 42c3e46f-2477-44d7-a85b-d3b43f6b31fa/ai-grid-users
+                                      users:
+                                          - 42c3e46f-2477-44d7-a85b-d3b43f6b31fa/alice
+                                  model_refs:
+                                      - name: free-model
+                                        subjects:
+                                            groups:
+                                                - name: 42c3e46f-2477-44d7-a85b-d3b43f6b31fa/ai-grid-users
+                                            users:
+                                                - 42c3e46f-2477-44d7-a85b-d3b43f6b31fa/alice
+                                - subscription_id_header: owner-subscription
+                                  subscription_description: Premium Plan
+                                  priority: 10
+                                  model_refs: []
+                "500":
+                    description: Internal Server Error response.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+    /v1/model/{model-id}/subscriptions:
+        get:
+            tags:
+                - subscriptions
+            summary: List subscriptions the user has access to for a specific model
+            description: Returns MaaSSubscription resources the user has access to that include the specified model in their modelRefs. The model-id parameter must be the MaaSModelRef resource name (e.g. "facebook-opt-125m-simulated"), not the served model name (e.g. "facebook/opt-125m") or the route path. Useful for populating a subscription dropdown when the user must specify X-MaaS-Subscription.
+            operationId: subscriptions#list_for_model
+            parameters:
+                - in: path
+                  name: model-id
+                  schema:
+                      type: string
+                  required: true
+                  description: The MaaSModelRef resource name (e.g. "facebook-opt-125m-simulated"). This is the name of the MaaSModelRef, not the served model ID or the route path.
+            responses:
+                "200":
+                    description: OK response.
+                    content:
+                        application/json:
+                            schema:
+                                type: array
+                                items:
+                                    $ref: '#/components/schemas/SubscriptionListItem'
+                            example:
+                                - subscription_id_header: premium
+                                  subscription_description: Premium Plan
+                                  priority: 10
+                                  model_refs: []
+                "400":
+                    description: Bad Request. Missing model-id parameter.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                "500":
+                    description: Internal Server Error response.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+    /v1/tenants:
+        get:
+            tags:
+                - tenants
+            summary: Get tenant information and gateway metadata
+            description: |
+                Returns tenant name and gateway connection metadata for this MaaS API instance.
+
+                This endpoint is intended for UI/dashboard consumption to discover:
+                - The tenant name this API instance serves
+                - Gateway hostname, protocol, and port for connecting to models
+
+                **Authorization**: Uses system:authenticated - any authenticated user can access.
+
+                **Important**: This endpoint is NOT exposed through the Gateway (HTTPRoute excludes it).
+                It is only accessible via internal Service URL for security.
+
+                **Configuration Requirements**:
+                - Gateway must have external hostname configured in spec.listeners[].hostname
+                - LoadBalancer service type required (ClusterIP + OpenShift Route is not supported)
+                - Returns 500 error if Gateway has no external hostname configured
+            operationId: tenants#get
+            responses:
+                "200":
+                    description: OK response.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/TenantsResponse'
+                            example:
+                                tenants:
+                                  - name: default-tenant
+                                    gateway:
+                                      name: maas-default-gateway
+                                      namespace: openshift-ingress
+                                      protocol: https
+                                      externalUrl: https://maas.apps.example.com
+                                      port: 443
+                "401":
+                    description: Unauthorized. Missing or invalid authentication token.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                "404":
+                    description: Gateway resource not found.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                "500":
+                    description: Internal Server Error. Failed to resolve gateway metadata or gateway not configured with external hostname.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT  # optional, for documentation purposes only
+  
+  schemas:
+        # Simple error response used by Gin handlers
+        ErrorResponse:
+            type: object
+            properties:
+                error:
+                    type: object
+                    description: Error details
+                    properties:
+                        message:
+                            type: string
+                            description: Human-readable error message
+                            example: Failed to retrieve models
+                        type:
+                            type: string
+                            description: Error type classification
+                            example: server_error
+                    required:
+                        - message
+                        - type
+            required:
+                - error
+        
+        # Health check response
+        HealthResponse:
+            type: object
+            properties:
+                status:
+                    type: string
+                    description: Health status
+                    example: healthy
+            required:
+                - status
+        
+        # Model list response
+        ModelListResponse:
+            type: object
+            properties:
+                object:
+                    type: string
+                    description: Object type, always "list"
+                    example: list
+                data:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/Model'
+                    description: Array of model objects
+            example:
+                object: list
+                data:
+                    - created: 1672531200
+                      id: llama-2-7b-chat
+                      object: model
+                      owned_by: model-namespace/llama-2-7b-chat
+                      ready: true
+                      url: https://api.example.com/v1/models/llama-2-7b-chat
+                      kind: LLMInferenceService
+                      subscriptions:
+                          - name: basic-subscription
+                    - created: 1672531200
+                      id: mistral-7b-instruct
+                      object: model
+                      owned_by: model-namespace/mistral-7b-instruct
+                      ready: true
+                      url: https://api.example.com/v1/models/mistral-7b-instruct
+                      kind: LLMInferenceService
+                      subscriptions:
+                          - name: basic-subscription
+            required:
+                - object
+                - data
+        
+        # Model schema
+        Model:
+            type: object
+            properties:
+                id:
+                    type: string
+                    description: The model identifier
+                    example: llama-2-7b-chat
+                object:
+                    type: string
+                    description: The object type, always "model"
+                    example: model
+                created:
+                    type: integer
+                    description: The Unix timestamp (in seconds) when the model was created
+                    example: 1672531200
+                    format: int64
+                owned_by:
+                    type: string
+                    description: "The namespace and MaaSModelRef name (format: namespace/name)"
+                    example: model-namespace/llama-2-7b-chat
+                ready:
+                    type: boolean
+                    description: Model ready status
+                    example: true
+                url:
+                    type: string
+                    description: Model URL (optional)
+                    example: https://api.example.com/v1/models/llama-2-7b-chat
+                modelDetails:
+                    type: object
+                    description: Additional model metadata from MaaSModelRef annotations
+                    properties:
+                        displayName:
+                            type: string
+                            description: Human-readable display name (from openshift.io/display-name annotation)
+                            example: Llama 2 7B Chat
+                        description:
+                            type: string
+                            description: Model description (from openshift.io/description annotation)
+                            example: A large language model optimized for chat use cases
+                        genaiUseCase:
+                            type: string
+                            description: GenAI use case category (from opendatahub.io/genai-use-case annotation)
+                            example: chat
+                        contextWindow:
+                            type: string
+                            description: Context window size (from opendatahub.io/context-window annotation)
+                            example: "4096"
+                        modelCapabilities:
+                            type: array
+                            items:
+                                type: string
+                            description: Model capabilities (from opendatahub.io/model-capabilities annotation)
+                            example: ["text-generation", "image-text-inferencing"]
+                kind:
+                    type: string
+                    description: The model reference kind (e.g., "LLMInferenceService")
+                    example: LLMInferenceService
+                subscriptions:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/SubscriptionInfo'
+                    description: |
+                        Array of subscriptions that provide access to this model.
+                        When X-MaaS-Return-All-Models is used, models accessible via multiple
+                        subscriptions will have multiple entries in this array.
+                    example:
+                        - name: premium-subscription
+                          displayName: Premium Tier
+                          description: Premium subscription with higher rate limits
+            example:
+                created: 1672531200
+                id: llama-2-7b-chat
+                object: model
+                owned_by: model-namespace/llama-2-7b-chat
+                ready: true
+                url: https://api.example.com/v1/models/llama-2-7b-chat
+                modelDetails:
+                    displayName: Llama 2 7B Chat
+                    description: A large language model optimized for chat use cases
+                    genaiUseCase: chat
+                    contextWindow: "4096"
+                kind: LLMInferenceService
+                subscriptions:
+                    - name: premium-subscription
+                      displayName: Premium Tier
+                      description: Premium subscription with higher rate limits
+            required:
+                - id
+                - object
+                - created
+                - owned_by
+                - ready
+
+        # Subscription metadata
+        SubscriptionInfo:
+            type: object
+            properties:
+                name:
+                    type: string
+                    description: The subscription name
+                    example: premium-subscription
+                displayName:
+                    type: string
+                    description: Human-readable display name for the subscription
+                    example: Premium Tier
+                description:
+                    type: string
+                    description: Description of the subscription
+                    example: Premium subscription with higher rate limits
+            required:
+                - name
+        
+        # Subscription info for list responses
+        SubscriptionListItem:
+            type: object
+            properties:
+                subscription_id_header:
+                    type: string
+                    description: Always present. Subscription name to use in the X-MaaS-Subscription header.
+                    example: premium
+                subscription_description:
+                    type: string
+                    description: Always present. Human-readable description from the openshift.io/description annotation; empty when unset.
+                    example: Premium Plan
+                display_name:
+                    type: string
+                    description: Display name from the openshift.io/display-name annotation. Omitted when unset or empty.
+                    example: Premium
+                priority:
+                    type: integer
+                    format: int32
+                    description: Always present. Subscription priority (higher = higher priority).
+                    example: 10
+                model_refs:
+                    type: array
+                    description: |
+                        Always present, but may be empty. Administered items contain every configured
+                        reference. Owner-only and API-key items retain the existing inference-eligible
+                        reference set. The MaaSModelRef namespace is used internally for exact joins
+                        and authorization but is not returned.
+                    items:
+                        $ref: '#/components/schemas/ModelRefInfo'
+                roles:
+                    type: array
+                    description: |
+                        Effective caller relationship. Omitted for owner-only and API-key responses.
+                        Admin-only is ["admin"]; owner/admin overlap is ["owner","admin"].
+                    items:
+                        type: string
+                        enum:
+                            - owner
+                            - admin
+                    example:
+                        - admin
+                owner:
+                    $ref: '#/components/schemas/SubjectInventory'
+                organization_id:
+                    type: string
+                    description: |
+                        Verbatim MaaSSubscription.spec.organization.id when that administrative
+                        association is present; otherwise the legacy tokenMetadata.organizationId
+                        attribution value. Omitted when both are absent. This field describes
+                        association and does not itself grant access.
+                    example: 42c3e46f-2477-44d7-a85b-d3b43f6b31fa
+                cost_center:
+                    type: string
+                    description: Cost center for usage attribution. Omitted when unset or empty.
+                    example: ai-team
+                labels:
+                    type: object
+                    additionalProperties:
+                        type: string
+                    description: Additional labels for tracking and metrics. Omitted when no labels are set.
+                    example:
+                        env: production
+            required:
+                - subscription_id_header
+                - priority
+                - model_refs
+
+        SubjectInventory:
+            type: object
+            description: |
+                Admin-only inventory of subscription owners that also have model access. On a model
+                reference, it contains only owners with access to that exact model reference. On a
+                subscription, it is the deduplicated union across all returned model references.
+                The object and its arrays are omitted when no owner satisfies both conditions.
+            properties:
+                groups:
+                    type: array
+                    description: |
+                        Owner group names that also appear as organization-qualified model-access
+                        subjects for the applicable model-reference scope. Omitted when none
+                        satisfy both conditions.
+                    items:
+                        type: object
+                        properties:
+                            name:
+                                type: string
+                                description: Opaque owner and model-access group name.
+                        required:
+                            - name
+                    example:
+                        - name: 42c3e46f-2477-44d7-a85b-d3b43f6b31fa/ai-grid-users
+                users:
+                    type: array
+                    description: |
+                        Owner user names that also appear as organization-qualified model-access
+                        subjects for the applicable model-reference scope. Omitted when none
+                        satisfy both conditions.
+                    items:
+                        type: string
+                    example:
+                        - 42c3e46f-2477-44d7-a85b-d3b43f6b31fa/alice
+
+        ModelRefInfo:
+            type: object
+            properties:
+                name:
+                    type: string
+                    description: Always present. Name of the MaaSModelRef; unique within its internal namespace.
+                    example: free-model-ref
+                subjects:
+                    $ref: '#/components/schemas/SubjectInventory'
+                display_name:
+                    type: string
+                    description: Display name from the openshift.io/display-name annotation on the MaaSModelRef. Omitted when unset or empty.
+                    example: Free Model
+                description:
+                    type: string
+                    description: Description from the openshift.io/description annotation on the MaaSModelRef. Omitted when unset or empty.
+                    example: A free-tier model for general use
+                source:
+                    type: string
+                    description: "Classification of the model: internal (on-cluster) or external (third-party API). Omitted until the referenced model source is resolved."
+                    enum:
+                        - internal
+                        - external
+                    example: internal
+                token_rate_limits:
+                    type: array
+                    description: Configured token budgets. Omitted when no budget is configured.
+                    items:
+                        type: object
+                        properties:
+                            limit:
+                                type: integer
+                                format: int64
+                                description: Maximum number of tokens allowed
+                                example: 100
+                            window:
+                                type: string
+                                description: "Time window (e.g., 1m, 1h, 24h). Allowed units: s, m, h (1-9999)."
+                                pattern: "^[1-9]\\d{0,3}(s|m|h)$"
+                                example: 1m
+                        required:
+                            - limit
+                            - window
+                unlimited:
+                    type: boolean
+                    description: Present only with the value true when no token budget is enforced; usage is still metered. Mutually exclusive with token_rate_limits.
+                    example: false
+                billing_rate:
+                    type: object
+                    description: Configured billing rate. Omitted when no billing rate is configured.
+                    properties:
+                        per_token:
+                            type: string
+                            description: Cost per token
+                            example: "0.001"
+                    required:
+                        - per_token
+            required:
+                - name
+
+        CallerIdentity:
+            type: object
+            description: |
+                Caller identity fields without computed permissions or inventory. `sub` is always
+                present. OIDC responses also carry the verified `iss` claim; other
+                gateway-authenticated responses omit `iss`. Optional scalar and array fields are
+                returned verbatim when present and nonempty, and are omitted otherwise.
+            properties:
+                iss:
+                    type: string
+                    format: uri
+                    description: Verified OIDC issuer claim. Omitted for other authenticated callers.
+                    example: https://issuer.example.com
+                sub:
+                    type: string
+                    description: Verified OIDC subject claim, or trusted gateway identity.
+                    example: user-1
+                name:
+                    type: string
+                    description: Verified OIDC full-name claim, or trusted gateway identity. Omitted when absent or empty.
+                    example: Alex User
+                given_name:
+                    type: string
+                    description: Verified given-name claim. Omitted when absent or empty.
+                    example: Alex
+                family_name:
+                    type: string
+                    description: Verified family-name claim. Omitted when absent or empty.
+                    example: User
+                preferred_username:
+                    type: string
+                    description: Verified OIDC preferred-username claim, or trusted gateway identity. Omitted when absent or empty.
+                    example: alex
+                email:
+                    type: string
+                    format: email
+                    description: Verified email claim. Omitted when absent or empty.
+                    example: alex@example.com
+                groups:
+                    type: array
+                    description: |
+                        All literal verified OIDC group claims, or groups associated with the trusted
+                        gateway identity. Omitted when absent or empty. Group names are independent
+                        of organization membership entries and do not imply an organization role.
+                    items:
+                        type: string
+                    example:
+                        - 42c3e46f-2477-44d7-a85b-d3b43f6b31fa/users
+                https://redhat.com/maas/orgs:
+                    type: array
+                    description: |
+                        All literal verified organization membership entries, without filtering by
+                        target or role. Omitted when the claim is absent or empty.
+                    items:
+                        $ref: '#/components/schemas/OrganizationMembership'
+            required:
+                - sub
+
+        OrganizationMembership:
+            type: object
+            description: One literal verified organization membership entry.
+            properties:
+                organization_id:
+                    type: string
+                    format: uuid
+                    description: Always present. Canonical organization UUID.
+                    example: 42c3e46f-2477-44d7-a85b-d3b43f6b31fa
+                organization_name:
+                    type: string
+                    description: Organization display name. Omitted when absent or empty.
+                    example: grid-tenant
+                roles:
+                    type: array
+                    description: |
+                        Literal roles from the same organization entry. Omitted when the roles claim
+                        is absent or empty; absence means the caller has no organization role.
+                    items:
+                        type: string
+                    example:
+                        - admins
+            required:
+                - organization_id
+
+        # API Key configuration limits
+        ApiKeyConfig:
+            type: object
+            properties:
+                max_expiration_days:
+                    type: integer
+                    description: Maximum expiration in days for regular API keys
+                    example: 90
+                ephemeral_max_expiration:
+                    type: string
+                    description: Maximum expiration for ephemeral API keys
+                    example: "1h"
+            required:
+                - max_expiration_days
+                - ephemeral_max_expiration
+
+        # API Key metadata
+        ApiKey:
+            type: object
+            properties:
+                id:
+                    type: string
+                    description: Unique identifier for the API key
+                name:
+                    type: string
+                    description: User-friendly name for the API key
+                description:
+                    type: string
+                    description: Optional description providing context about the key's purpose
+                username:
+                    type: string
+                    description: Username that owns this API key
+                subscription:
+                    type: string
+                    description: MaaSSubscription name bound to this key at creation time
+                groups:
+                    type: array
+                    items:
+                        type: string
+                    description: User's groups at creation time (immutable snapshot for authorization)
+                creationDate:
+                    type: string
+                    format: date-time
+                    description: When the API key was created
+                expirationDate:
+                    type: string
+                    format: date-time
+                    description: When the API key expires
+                status:
+                    type: string
+                    enum: [active, revoked, expired]
+                    description: Current status of the API key
+                lastUsedAt:
+                    type: string
+                    format: date-time
+                    description: When the API key was last used for validation
+                ephemeral:
+                    type: boolean
+                    description: Whether this is a short-lived programmatic token
+            required:
+                - id
+                - name
+                - creationDate
+                - status
+                - ephemeral
+
+        # API Key List Response (paginated)
+        ApiKeyListResponse:
+            type: object
+            properties:
+                object:
+                    type: string
+                    description: Object type, always "list"
+                    example: list
+                data:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/ApiKey'
+                    description: Array of API key metadata objects
+                has_more:
+                    type: boolean
+                    description: Whether there are more results beyond this page
+                    example: true
+            required:
+                - object
+                - data
+                - has_more
+
+        # Tenant Discovery Response
+        TenantsResponse:
+            type: object
+            properties:
+                tenants:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/TenantInfo'
+                    description: Array of tenant info objects (currently single element)
+            required:
+                - tenants
+
+        # Tenant Information
+        TenantInfo:
+            type: object
+            properties:
+                name:
+                    type: string
+                    description: Tenant name
+                    example: default-tenant
+                gateway:
+                    $ref: '#/components/schemas/GatewayMetadata'
+            required:
+                - name
+                - gateway
+
+        # Gateway Connection Metadata
+        GatewayMetadata:
+            type: object
+            properties:
+                name:
+                    type: string
+                    description: Gateway resource name
+                    example: maas-default-gateway
+                namespace:
+                    type: string
+                    description: Gateway namespace
+                    example: openshift-ingress
+                protocol:
+                    type: string
+                    description: Protocol (http or https)
+                    example: https
+                    enum: [http, https]
+                externalUrl:
+                    type: string
+                    description: Full external URL to access the gateway
+                    example: https://maas.apps.example.com
+                port:
+                    type: integer
+                    description: Gateway port
+                    example: 443
+                    format: int64
+            required:
+                - name
+                - namespace
+                - protocol
+                - externalUrl
+                - port
+tags:
+    - name: api-keys
+      description: "\U0001F5DD️ Named API Key Management service. Long-lived, trackable tokens for applications."
+    - name: api-keys-v2
+      description: "\U0001F511 API Key Management v2. OpenAI-compatible API keys with hash-based storage."
+    - name: health
+      description: ❤️ Health check service
+    - name: identity
+      description: "\U0001F464 Verified caller identity service"
+    - name: models
+      description: "\U0001F916 Model management service"
+    - name: subscriptions
+      description: Subscription listing service
+    - name: tenants
+      description: "\U0001F3E2 Tenant discovery service. Returns tenant name and gateway connection metadata."
