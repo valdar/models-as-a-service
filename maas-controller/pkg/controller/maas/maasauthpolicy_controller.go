@@ -2091,9 +2091,10 @@ func (r *MaaSAuthPolicyReconciler) handleDeletion(ctx context.Context, log logr.
 	return ctrl.Result{}, nil
 }
 
-// ensureBaseGatewayAuthPolicy bootstraps maas-gateway-auth with empty model access when
-// missing. On the shared default gateway it also removes legacy gateway-default-auth left
-// over from pre-#912 clusters. Existing policies are left unchanged.
+// ensureBaseGatewayAuthPolicy creates the base gateway AuthPolicy and keeps it
+// current when the tenant has no live MaaSAuthPolicies. Otherwise the model-policy
+// reconciler owns updates, including guardrail rules and response headers.
+// On the shared default gateway it also removes legacy gateway-default-auth.
 func (r *MaaSAuthPolicyReconciler) ensureBaseGatewayAuthPolicy(
 	ctx context.Context, log logr.Logger,
 	oidc *oidcConfig, xAPIKeyEnabled bool, tenantNamespace, tenantID, gatewayNamespace, gatewayName string,
@@ -2106,7 +2107,21 @@ func (r *MaaSAuthPolicyReconciler) ensureBaseGatewayAuthPolicy(
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(schema.GroupVersionKind{Group: "kuadrant.io", Version: "v1", Kind: "AuthPolicy"})
 	if err := r.Get(ctx, client.ObjectKey{Name: authPolicyName, Namespace: gatewayNamespace}, existing); err == nil {
-		return nil
+		if !isManaged(existing) {
+			return nil
+		}
+		// AITenant changes also reconcile MaasTenantConfig. Without model policies
+		// there is no MaaSAuthPolicy request to refresh this existing base policy,
+		// so the tenant reconciler must propagate OIDC changes and removal here.
+		policies := &maasv1alpha1.MaaSAuthPolicyList{}
+		if err := r.List(ctx, policies, client.InNamespace(tenantNamespace)); err != nil {
+			return fmt.Errorf("list MaaSAuthPolicies before updating base gateway AuthPolicy: %w", err)
+		}
+		for _, policy := range policies.Items {
+			if policy.DeletionTimestamp.IsZero() {
+				return nil
+			}
+		}
 	} else if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("failed to check gateway AuthPolicy %s/%s: %w", gatewayNamespace, authPolicyName, err)
 	}

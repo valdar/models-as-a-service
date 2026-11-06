@@ -914,8 +914,8 @@ func (r *TenantReconciler) cleanupMaaSAuthPolicies(ctx context.Context, log logr
 	return true, nil
 }
 
-// ensureGatewayManagementAuth bootstraps maas-gateway-auth when missing so /maas-api/*
-// management endpoints receive Authorino identity headers (RHOAIENG-81214).
+// ensureGatewayManagementAuth ensures /maas-api/* receives Authorino identity
+// headers before model policies exist, including after OIDC configuration changes.
 func (r *TenantReconciler) ensureGatewayManagementAuth(ctx context.Context, log logr.Logger, tenant *maasv1alpha1.MaasTenantConfig) error {
 	tenantID, err := tenantreconcile.TenantIdentifierFor(tenant)
 	if err != nil {
